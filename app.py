@@ -382,9 +382,21 @@ def create_case(request: CaseRequest):
         scored = score_transaction(request)
     except ValueError as exc:
         field = str(exc)
+        messages = {
+            "amount_inr": "amount_inr must be between 1 and 1000000",
+            "hour_of_day": "hour_of_day must be between 0 and 23",
+            "txn_count_last_24h": "txn_count_last_24h must be non-negative",
+            "avg_amount_30d_inr": "avg_amount_30d_inr must be greater than 0",
+            "merchant_category": "Unknown merchant category",
+            "city": "Unknown city",
+            "payment_mode": "Unknown payment mode",
+        }
         return JSONResponse(
             status_code=400,
-            content={"error": f"Invalid transaction field: {field}", "field": field},
+            content={
+                "error": messages.get(field, "Invalid transaction"),
+                "field": field,
+            },
         )
     except RuntimeError:
         return JSONResponse(
@@ -392,6 +404,17 @@ def create_case(request: CaseRequest):
             content={"error": "Fraud model is not ready"},
         )
 
+    # Do not generate a case note when the transaction is not flagged.
+    if not scored["flagged"]:
+        return {
+            **scored,
+            "case_note": None,
+            "attempts": 0,
+            "safe_default": False,
+            "guardrail_override": False,
+        }
+
+    # Generate a case note only for flagged transactions.
     result = run_case(
         txn_id=request.txn_id,
         fraud_probability=scored["fraud_probability"],
@@ -401,13 +424,25 @@ def create_case(request: CaseRequest):
 
     note = result.get("case_note")
     action = note.get("recommended_action") if note else None
-    if action == "block_and_notify":
+    safe_default = result.get("safe_default", False)
+    guardrail_override = result.get("guardrail_override", False)
+
+    if result.get("status") == "no_policy_match":
         scored["decision"] = "hold_for_review"
         scored["human_review"] = True
-    elif action == "hold_for_review":
+
+    elif action == "approve":
+        # A flagged transaction must not be auto-approved.
+        note["recommended_action"] = "hold_for_review"
         scored["decision"] = "hold_for_review"
         scored["human_review"] = True
-    elif result.get("safe_default"):
+        guardrail_override = True
+
+    elif action == "block_and_notify":
+        scored["decision"] = "block_and_notify"
+        scored["human_review"] = True
+
+    elif action == "hold_for_review" or safe_default:
         scored["decision"] = "hold_for_review"
         scored["human_review"] = True
 
@@ -417,8 +452,8 @@ def create_case(request: CaseRequest):
         "status": result.get("status"),
         "attempts": result.get("attempts", 0),
         "failures": result.get("failures", []),
-        "safe_default": result.get("safe_default", False),
-        "guardrail_override": result.get("guardrail_override", False),
+        "safe_default": safe_default,
+        "guardrail_override": guardrail_override,
         "retrieved_policy_id": result.get("retrieved_policy_id"),
         "retrieval_score": result.get("retrieval_score"),
     }
