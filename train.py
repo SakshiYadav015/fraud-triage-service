@@ -153,12 +153,36 @@ def preprocess_data(X_train, X_val, X_test):
         fill_value=0,
     )
 
-    # Make the feature order deterministic.
-    sorted_columns = sorted(X_train.columns)
+    
+    # Keep numeric and engineered features in a fixed order.
+    numeric_columns = [
+        "amount_inr",
+        "hour_of_day",
+        "txn_count_last_24h",
+        "avg_amount_30d_inr",
+        "distance_from_home_km",
+        "is_new_device",
+        "account_age_days",
+        "amount_vs_avg_ratio",
+        "is_night",
+        "high_value",
+    ]
 
-    X_train = X_train.reindex(columns=sorted_columns)
-    X_val = X_val.reindex(columns=sorted_columns)
-    X_test = X_test.reindex(columns=sorted_columns)
+    # Keep one-hot encoded features in a fixed order too.
+    categorical_encoded_columns = sorted(
+        column for column in X_train.columns
+        if column not in numeric_columns
+    )
+
+    feature_columns = (
+        numeric_columns + categorical_encoded_columns
+    )
+
+    X_train = X_train.reindex(columns=feature_columns)
+    X_val = X_val.reindex(columns=feature_columns)
+    X_test = X_test.reindex(columns=feature_columns)
+
+
 
     return (
         X_train,
