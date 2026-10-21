@@ -28,3 +28,6 @@ Thumbs.db
 # Runtime logs and temporary backups
 *.log
 train_step*_backup.py 
+app_backup.py
+!service.log
+README_backup.md
