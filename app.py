@@ -89,9 +89,9 @@ class Txn(BaseModel):
     city: str
     payment_mode: str
     amount_inr: float
-    hour_of_day: int = Field(ge=0, le=23)
-    txn_count_last_24h: int = Field(ge=0)
-    avg_amount_30d_inr: float = Field(gt=0)
+    hour_of_day: int
+    txn_count_last_24h: int
+    avg_amount_30d_inr: float
     distance_from_home_km: float | None = Field(default=None, ge=0)
     is_new_device: int = Field(ge=0, le=1)
     account_age_days: int = Field(ge=0)
@@ -148,26 +148,39 @@ def transaction_features(txn: Txn) -> pd.DataFrame:
     )
     return row.reindex(columns=MODEL_ARTIFACTS["columns"], fill_value=0)
 
-
 def score_transaction(txn: Txn) -> dict:
     if not MODEL_ARTIFACTS:
         raise RuntimeError("Fraud model is not ready")
 
-    if not 0 < txn.amount_inr <= 1_000_000:
+    # Reject impossible values before model scoring.
+    if not 1 <= txn.amount_inr <= 1_000_000:
         raise ValueError("amount_inr")
 
+    if not 0 <= txn.hour_of_day <= 23:
+        raise ValueError("hour_of_day")
+
+    if txn.txn_count_last_24h < 0:
+        raise ValueError("txn_count_last_24h")
+
+    if txn.avg_amount_30d_inr <= 0:
+        raise ValueError("avg_amount_30d_inr")
+
     features = transaction_features(txn)
+
     probability = float(
         MODEL_ARTIFACTS["model"].predict_proba(features)[0][1]
     )
     threshold = float(MODEL_ARTIFACTS["threshold"])
     flagged = probability >= threshold
 
-    # A high-value payment on a new device needs review even if its
-    # model score is below the fraud threshold.
-    human_review = flagged or (
-        txn.amount_inr >= 100_000 and txn.is_new_device == 1
+    # High-value payment on a new device needs human review.
+    large_payment_hold = (
+        not flagged
+        and txn.amount_inr >= 100_000
+        and txn.is_new_device == 1
     )
+
+    human_review = flagged or large_payment_hold
     decision = "hold_for_review" if human_review else "approve"
 
     return {
@@ -344,7 +357,10 @@ def score(txn: Txn):
     except ValueError as exc:
         field = str(exc)
         messages = {
-            "amount_inr": "amount_inr must be greater than 0 and at most 1000000",
+            "amount_inr": "amount_inr must be between 1 and 1000000",
+            "hour_of_day": "hour_of_day must be between 0 and 23",
+            "txn_count_last_24h": "txn_count_last_24h must be non-negative",
+            "avg_amount_30d_inr": "avg_amount_30d_inr must be greater than 0",
             "merchant_category": "Unknown merchant category",
             "city": "Unknown city",
             "payment_mode": "Unknown payment mode",
