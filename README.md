@@ -23,7 +23,8 @@ In a second terminal, run the API checks against `http://127.0.0.1:8000`. The se
 Transaction data preparation includes data cleaning and feature engineering. The smoke test confirms that the prepared data pipeline runs successfully.
 
 ## Part B results
-The selected Random Forest configuration uses `max_depth=None` and `min_samples_leaf=5`. At threshold `0.4`, the reported precision is approximately `0.2819`, recall `0.7260`, and F1 score `0.4061`.
+
+The selected Random Forest configuration uses `max_depth=None` and `min_samples_leaf=5`, with a mean 5-fold cross-validation F1 score of 0.4642. At the selected threshold of `0.4`, validation precision is approximately `0.2663`, recall is `0.7260`, and F1 score is `0.3897`. The threshold was selected to prioritize fraud recall while meeting the target recall constraint. The test set was not used for model selection.
 
 ## Part C results
 Policy retrieval evaluation reports 8/8 in-scope top-1 hits and 2/2 out-of-scope queries rejected. The configured minimum retrieval score is `0.45`. The smoke test also confirms that the example policy query retrieves P1 with a score of approximately `0.5501`.
