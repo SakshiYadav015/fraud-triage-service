@@ -1,33 +1,8 @@
-# Python cache
+.env
 __pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environment
+*.pyc
 .venv/
 venv/
-env/
-
-# Environment variables and secrets
-.env
-.env.*
-
-# Test and coverage artifacts
+.project-1/
 .pytest_cache/
-.coverage
-htmlcov/
 
-# Editor and operating system files
-.vscode/
-.DS_Store
-Thumbs.db
-
-# Generated model artifacts
-*.pkl
-*.joblib
-# Runtime logs and temporary backups
-*.log
-train_step*_backup.py 
-app_backup.py
-!service.log
-README_backup.md

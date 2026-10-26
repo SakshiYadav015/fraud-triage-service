@@ -1,98 +1,52 @@
-
+"""Part C (retrieval): TF-IDF lookup of the fraud policy that fits a question."""
 import json
-from pathlib import Path
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+POLICY_FILE = "fraud_policies.json"
+QUERY_FILE = "retrieval_queries.json"
 
+# Chosen from the measured scores: highest out-of-scope score is 0.4251 and
+# the lowest in-scope score is 0.4862, so 0.45 sits between them.
 MIN_SCORE = 0.45
 
+with open(POLICY_FILE) as f:
+    POLICIES = json.load(f)
 
-def load_policies():
-    """Load the six fraud policies from the project JSON file."""
-    path = Path(__file__).with_name("fraud_policies.json")
-
-    with path.open("r", encoding="utf-8") as file:
-        policies = json.load(file)
-
-    return policies
-
-
-POLICIES = load_policies()
-
-# Fit default TF-IDF settings on policy text only.
-POLICY_TEXTS = [policy["text"] for policy in POLICIES]
-
-VECTORIZER = TfidfVectorizer()
-POLICY_MATRIX = VECTORIZER.fit_transform(POLICY_TEXTS)
+_vectorizer = TfidfVectorizer()
+_policy_matrix = _vectorizer.fit_transform([p["text"] for p in POLICIES])
 
 
 def retrieve(query):
-    """
-    Return (policy_id, policy_text, score) for the most
-    similar policy. MIN_SCORE is applied by the caller.
-    """
-    query_vector = VECTORIZER.transform([query])
-    scores = cosine_similarity(query_vector, POLICY_MATRIX)[0]
-
-    best_index = int(scores.argmax())
-    best_policy = POLICIES[best_index]
-
-    return (
-        best_policy["policy_id"],
-        best_policy["text"],
-        float(scores[best_index]),
-    )
+    """Return (policy_id, policy_text, score) for the most similar policy."""
+    similarities = cosine_similarity(_vectorizer.transform([query]), _policy_matrix)[0]
+    best = int(similarities.argmax())
+    return POLICIES[best]["policy_id"], POLICIES[best]["text"], float(similarities[best])
 
 
 def main():
-    path = Path(__file__).with_name("retrieval_queries.json")
+    with open(QUERY_FILE) as f:
+        queries = json.load(f)
 
-    with path.open("r", encoding="utf-8") as file:
-        queries = json.load(file)
-
-    print("\nPOLICY RETRIEVAL RESULTS")
-    print("-" * 100)
-    print(
-        f"{'Query':<58} {'Expected':<12} "
-        f"{'Retrieved':<18} {'Score':>7}"
-    )
-    print("-" * 100)
-
-    hits = 0
-    in_scope = 0
-    out_of_scope_rejected = 0
-
+    print(f"{'query':<68}{'expected':<10}{'retrieved':<10}{'score':<8}")
+    hits, in_scope = 0, 0
+    in_scope_scores, out_scope_scores = [], []
     for item in queries:
-        expected = item["expected_policy"]
         policy_id, _, score = retrieve(item["query"])
-
-        if score < MIN_SCORE:
-            displayed_policy = "no_policy_match"
+        expected = item["expected_policy"]
+        if expected is None:
+            out_scope_scores.append(score)
         else:
-            displayed_policy = policy_id
-
-        if expected is not None:
             in_scope += 1
-            if displayed_policy == expected:
-                hits += 1
-        elif displayed_policy == "no_policy_match":
-            out_of_scope_rejected += 1
+            hits += policy_id == expected
+            in_scope_scores.append(score)
+        print(f"{item['query']:<68}{str(expected):<10}{policy_id:<10}{score:.4f}")
 
-        query_display = item["query"][:56]
-
-        print(
-            f"{query_display:<58} "
-            f"{str(expected):<12} "
-            f"{displayed_policy:<18} "
-            f"{score:>7.4f}"
-        )
-
-    print("-" * 100)
-    print(f"In-scope top-1 hits: {hits}/{in_scope}")
-    print(f"Out-of-scope queries rejected: {out_of_scope_rejected}/2")
-    print(f"MIN_SCORE: {MIN_SCORE:.2f}")
+    print(f"\nin-scope top-1 hits: {hits} of {in_scope}")
+    print(f"highest out-of-scope score: {max(out_scope_scores):.4f}")
+    print(f"lowest in-scope score:      {min(in_scope_scores):.4f}")
+    print(f"MIN_SCORE chosen:           {MIN_SCORE}")
 
 
 if __name__ == "__main__":

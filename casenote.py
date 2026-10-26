@@ -1,253 +1,141 @@
-
+"""Part C (case notes): prompt, three validation gates, retry, fallback, guardrail."""
 import json
 
 import mock_llm
-from retrieval import retrieve, MIN_SCORE
+from retrieval import MIN_SCORE, retrieve
 
+SCENARIO_FILE = "case_scenarios.json"
+GUARDRAIL_PROBABILITY = 0.5
+NOTE_KEYS = ["summary", "priority", "recommended_team", "recommended_action", "policy_id"]
 
-CASE_NOTE_SCHEMA = {
+# The case-note rules, written once in JSON Schema vocabulary.
+NOTE_SCHEMA = {
     "type": "object",
     "properties": {
         "summary": {"type": "string"},
-        "priority": {
-            "type": "string",
-            "enum": ["low", "medium", "high", "critical"],
-        },
-        "recommended_team": {
-            "type": "string",
-            "enum": [
-                "fraud_ops",
-                "customer_care",
-                "payments",
-                "account_security",
-                "card_risk",
-                "upi_risk",
-                "merchant_ops",
-            ],
-        },
-        "recommended_action": {
-            "type": "string",
-            "enum": [
-                "approve",
-                "hold_for_review",
-                "block_and_notify",
-            ],
-        },
-        "policy_id": {
-            "type": "string",
-            "enum": ["P1", "P2", "P3", "P4", "P5", "P6"],
-        },
+        "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+        "recommended_team": {"type": "string",
+                             "enum": ["card_risk", "upi_risk", "merchant_ops", "customer_care"]},
+        "recommended_action": {"type": "string",
+                               "enum": ["approve", "hold_for_review", "block_and_notify"]},
+        "policy_id": {"type": "string", "enum": ["P1", "P2", "P3", "P4", "P5", "P6"]},
     },
-    "required": [
-        "summary",
-        "priority",
-        "recommended_team",
-        "recommended_action",
-        "policy_id",
-    ],
+    "required": NOTE_KEYS,
 }
 
 
-def build_prompt(
-    txn_id,
-    fraud_probability,
-    amount_inr,
-    policy_id,
-    policy_text,
-):
-    """Build a constrained prompt for the mock LLM."""
-
-    return f"""ROLE:
-You are a payment fraud operations case-note assistant.
-
-TASK:
-Create one concise case note for the transaction using the supplied policy.
-
-CONSTRAINTS:
-Use only the supplied policy text to guide the recommendation.
-Do not invent facts about the transaction.
-Return exactly one valid JSON object and nothing else.
-Every required field must be present and have the correct type.
-Use only the allowed enum values specified in the output format.
-
-OUTPUT FORMAT:
-Return a JSON object with these five keys:
-- summary: string
-- priority: one of low, medium, high, critical
-- recommended_team: one of fraud_ops, customer_care, payments, account_security
-- recommended_action: one of approve, hold_for_review, block_and_notify
-- policy_id: one of P1, P2, P3, P4, P5, P6
-
-TRANSACTION DETAILS:
-TXN_ID: {txn_id}
-FRAUD_PROBABILITY: {fraud_probability}
-AMOUNT_INR: {amount_inr}
-POLICY_ID: {policy_id}
-
-POLICY TEXT:
-{policy_text}
-"""
+def build_prompt(txn_id, fraud_probability, amount_inr, policy_id, policy_text):
+    """Role, task, constraints and output format, in that order."""
+    properties = NOTE_SCHEMA["properties"]
+    allowed = "\n".join(f"- {key}: " + (", ".join(properties[key]["enum"]) if "enum" in properties[key]
+                                        else "free text, one or two sentences")
+                        for key in NOTE_KEYS)
+    return (
+        "ROLE:\n"
+        "You are a fraud analyst assistant on the Merchant Risk Desk.\n\n"
+        "TASK:\n"
+        "Write a short case note for the held payment below, using the policy text provided.\n"
+        f"TXN_ID: {txn_id}\n"
+        f"FRAUD_PROBABILITY: {fraud_probability}\n"
+        f"AMOUNT_INR: {amount_inr}\n"
+        f"POLICY_ID: {policy_id}\n"
+        f"POLICY_TEXT: {policy_text}\n\n"
+        "CONSTRAINTS:\n"
+        "- Use only the policy text above; do not invent rules.\n"
+        "- Reply with one JSON object and nothing else.\n\n"
+        "OUTPUT FORMAT:\n"
+        "A JSON object with exactly these five keys and allowed values:\n"
+        f"{allowed}\n"
+    )
 
 
 def validate(text, retrieved_policy_id):
-    """Return (parsed_note, gate_number); gate 0 means valid."""
-
-    # Gate 1: response must be a JSON object.
+    """Return (note, gate): the parsed note and 0 if it passed, else (None, failed gate)."""
+    # Gate 1: valid JSON object
     try:
         note = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError:
         return None, 1
-
     if not isinstance(note, dict):
         return None, 1
 
-    # Gate 2: required keys must exist and all values must be strings.
-    required = CASE_NOTE_SCHEMA["required"]
-    properties = CASE_NOTE_SCHEMA["properties"]
+    # Gate 2: all required keys present and each a string
+    for key in NOTE_SCHEMA["required"]:
+        if key not in note or not isinstance(note[key], str):
+            return None, 2
 
-    if any(key not in note for key in required):
-        return None, 2
-
-    if any(not isinstance(note[key], str) for key in required):
-        return None, 2
-
-    # Gate 3: enum values and retrieved policy ID must be valid.
-    for key in required:
-        allowed_values = properties[key].get("enum")
-        if allowed_values and note[key] not in allowed_values:
+    # Gate 3: allowed values, and the policy must be the one we retrieved
+    for key, rule in NOTE_SCHEMA["properties"].items():
+        if "enum" in rule and note[key] not in rule["enum"]:
             return None, 3
-
     if note["policy_id"] != retrieved_policy_id:
         return None, 3
-
     return note, 0
 
 
-def run_case(
-    txn_id,
-    fraud_probability,
-    amount_inr,
-    question,
-    max_attempts=3,
-):
-    """Retrieve a policy, generate a note, validate it, and retry if needed."""
+def safe_default_note(policy_id):
+    return {"summary": "Automated case note unavailable; manual review required.",
+            "priority": "high", "recommended_team": "customer_care",
+            "recommended_action": "hold_for_review", "policy_id": policy_id}
 
-    retrieved_policy_id, policy_text, score = retrieve(question)
 
+def run_case(txn_id, fraud_probability, amount_inr, question, max_attempts=3):
+    """Retrieve a policy, ask the model for a note, validate, retry and apply the guardrail.
+
+    A ConnectionError from the model is deliberately not caught here.
+    """
+    policy_id, policy_text, score = retrieve(question)
     if score < MIN_SCORE:
-        return {
-            "status": "no_policy_match",
-            "attempts": 0,
-            "failures": [],
-            "case_note": None,
-            "safe_default": False,
-            "guardrail_override": False,
-            "retrieved_policy_id": retrieved_policy_id,
-            "retrieval_score": score,
-        }
+        return {"status": "no_policy_match", "attempts": 0, "failures": [], "case_note": None,
+                "safe_default": False, "guardrail_override": False}
 
-    prompt = build_prompt(
-        txn_id,
-        fraud_probability,
-        amount_inr,
-        retrieved_policy_id,
-        policy_text,
-    )
-
+    prompt = build_prompt(txn_id, fraud_probability, amount_inr, policy_id, policy_text)
     failures = []
-    case_note = None
-    attempts = 0
-
+    note = None
     for _ in range(max_attempts):
-        attempts += 1
-
-        # ConnectionError intentionally propagates to the caller.
-        response = mock_llm.generate(prompt)
-        case_note, gate = validate(response, retrieved_policy_id)
-
+        note, gate = validate(mock_llm.generate(prompt), policy_id)
         if gate == 0:
             break
-
         failures.append(gate)
+        note = None
 
-    safe_default = case_note is None
-
+    safe_default = note is None
     if safe_default:
-        case_note = {
-            "summary": (
-                "Automated case note unavailable; manual review required."
-            ),
-            "priority": "high",
-            "recommended_team": "customer_care",
-            "recommended_action": "hold_for_review",
-            "policy_id": retrieved_policy_id,
-        }
+        note = safe_default_note(policy_id)
 
-    guardrail_override = False
+    override = False
+    if note["recommended_action"] == "approve" and fraud_probability >= GUARDRAIL_PROBABILITY:
+        note["recommended_action"] = "hold_for_review"
+        override = True
 
-    if (
-        case_note["recommended_action"] == "approve"
-        and fraud_probability >= 0.5
-    ):
-        case_note["recommended_action"] = "hold_for_review"
-        guardrail_override = True
-
-    return {
-        "status": "ok",
-        "attempts": attempts,
-        "failures": failures,
-        "case_note": case_note,
-        "safe_default": safe_default,
-        "guardrail_override": guardrail_override,
-        "retrieved_policy_id": retrieved_policy_id,
-        "retrieval_score": score,
-    }
+    return {"status": "ok", "attempts": len(failures) + (0 if safe_default else 1),
+            "failures": failures, "case_note": note,
+            "safe_default": safe_default, "guardrail_override": override}
 
 
 def main():
-    """Run all supplied scenarios and print a compact results table."""
-
-    with open("case_scenarios.json", "r", encoding="utf-8") as file:
-        scenarios = json.load(file)
-
     mock_llm.reset()
+    with open(SCENARIO_FILE) as f:
+        scenarios = json.load(f)
 
-    print("\nCASE NOTE TEST RESULTS")
-    print("-" * 112)
-    print(
-        f"{'Scenario':<10} {'Policy':<9} {'Attempts':<9} "
-        f"{'Failures':<14} {'Status':<18} {'Safe default':<13} "
-        f"{'Final action':<20} {'Override':<8}"
-    )
-    print("-" * 112)
-
-    for scenario in scenarios:
-        result = run_case(
-            txn_id=scenario["txn_id"],
-            fraud_probability=scenario["fraud_probability"],
-            amount_inr=scenario["amount_inr"],
-            question=scenario["question"],
-        )
-
-        note = result["case_note"]
-        final_action = (
-            note["recommended_action"] if note else "none"
-        )
-
-        print(
-            f"{scenario['txn_id']:<10} "
-            f"{str(result['retrieved_policy_id']):<9} "
-            f"{result['attempts']:<9} "
-            f"{str(result['failures']):<14} "
-            f"{result['status']:<18} "
-            f"{str(result['safe_default']):<13} "
-            f"{final_action:<20} "
-            f"{str(result['guardrail_override']):<8}"
-        )
-
-    print("-" * 112)
-    print(f"Scenarios processed: {len(scenarios)}")
-    print("Expected mock LLM calls: 19")
+    header = ["scenario", "policy", "attempts", "failures", "status", "safe default", "final action", "override"]
+    print(f"{header[0]:<16}{header[1]:<8}{header[2]:<10}{header[3]:<12}{header[4]:<8}{header[5]:<14}{header[6]:<18}{header[7]}")
+    total_calls = first_try = recovered = defaults = overrides = 0
+    for number, s in enumerate(scenarios, start=1):
+        policy_id = retrieve(s["question"])[0]
+        result = run_case(s["txn_id"], s["fraud_probability"], s["amount_inr"], s["question"])
+        total_calls += result["attempts"]
+        first_try += result["attempts"] == 1 and not result["safe_default"]
+        recovered += result["attempts"] > 1 and not result["safe_default"]
+        defaults += result["safe_default"]
+        overrides += result["guardrail_override"]
+        print(f"{'S' + str(number) + ' (' + s['txn_id'] + ')':<16}{policy_id:<8}{result['attempts']:<10}"
+            f"{str(result['failures']):<12}{result['status']:<8}"
+            f"{'yes' if result['safe_default'] else 'no':<14}"
+            f"{result['case_note']['recommended_action']:<18}"
+            f"{'yes' if result['guardrail_override'] else 'no'}")
+    print(f"\nTotals: {total_calls} model calls; {first_try} valid on first call; "
+        f"{recovered} recovered by retry; {defaults} safe default; {overrides} guardrail override")
 
 
 if __name__ == "__main__":

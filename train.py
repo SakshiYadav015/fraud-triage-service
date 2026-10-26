@@ -1,603 +1,170 @@
-
-from pathlib import Path
-
+"""Part B: fraud model, imbalance handling and alert threshold."""
 import numpy as np
 import pandas as pd
-from sklearn.base import clone
-from sklearn.model_selection import train_test_split
-from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import StratifiedKFold, cross_validate, GridSearchCV
-
-
-# --------------------------------------------------
-# Configuration
-# --------------------------------------------------
-
-RANDOM_STATE = 42
-
-BASE_DIR = Path(__file__).resolve().parent
-DATA_PATH = BASE_DIR / "transactions_raw.csv"
-
-
-# --------------------------------------------------
-# Load and prepare cleaned data
-# --------------------------------------------------
-
-def load_clean_data():
-    """Load raw transactions and apply the Part A cleaning pipeline."""
-    from prepare import clean_transactions, add_features
-
-    raw_df = pd.read_csv(DATA_PATH)
-
-    cleaned_df = clean_transactions(raw_df)
-    featured_df = add_features(cleaned_df)
-
-    return featured_df
-
-
-# --------------------------------------------------
-# Split data before learning preprocessing values
-# --------------------------------------------------
-
-def split_data(df):
-    """Create stratified train, validation, and test sets."""
-
-    target = "is_fraud"
-
-    excluded_columns = [
-        "txn_id",
-        "customer_id",
-        "chargeback_filed",
-        target,
-    ]
-
-    X = df.drop(columns=excluded_columns).copy()
-    y = df[target].astype(int).copy()
-
-    # First: 60% train, 40% temporary data
-    X_train, X_temp, y_train, y_temp = train_test_split(
-        X,
-        y,
-        test_size=0.40,
-        random_state=RANDOM_STATE,
-        stratify=y,
-    )
-
-    # Then split the temporary data equally:
-    # 20% validation and 20% test overall
-    X_val, X_test, y_val, y_test = train_test_split(
-        X_temp,
-        y_temp,
-        test_size=0.50,
-        random_state=RANDOM_STATE,
-        stratify=y_temp,
-    )
-
-    return X_train, X_val, X_test, y_train, y_val, y_test
-
-
-# --------------------------------------------------
-# Preprocessing
-# --------------------------------------------------
-
-def preprocess_data(X_train, X_val, X_test):
-    """
-    Fit imputation and category encoding on training data only.
-    Apply the learned transformations to validation and test data.
-    """
-
-    X_train = X_train.copy()
-    X_val = X_val.copy()
-    X_test = X_test.copy()
-
-    categorical_columns = [
-        "merchant_category",
-        "city",
-        "payment_mode",
-    ]
-
-
-    # Learn the distance median from training data only.
-    distance_imputer = SimpleImputer(strategy="median")
-
-    X_train[["distance_from_home_km"]] = (
-        distance_imputer.fit_transform(
-            X_train[["distance_from_home_km"]]
-        )
-    )
-
-    X_val[["distance_from_home_km"]] = (
-        distance_imputer.transform(
-            X_val[["distance_from_home_km"]]
-        )
-    )
-
-    X_test[["distance_from_home_km"]] = (
-        distance_imputer.transform(
-            X_test[["distance_from_home_km"]]
-        )
-    )
-
-    training_distance_median = float(
-        distance_imputer.statistics_[0]
-    )
-
-    # One-hot encode categorical columns.
-    X_train = pd.get_dummies(
-        X_train,
-        columns=categorical_columns,
-        dtype=int,
-    )
-
-    X_val = pd.get_dummies(
-        X_val,
-        columns=categorical_columns,
-        dtype=int,
-    )
-
-    X_test = pd.get_dummies(
-        X_test,
-        columns=categorical_columns,
-        dtype=int,
-    )
-
-    # Align validation and test columns with training columns.
-    X_val = X_val.reindex(
-        columns=X_train.columns,
-        fill_value=0,
-    )
-
-    X_test = X_test.reindex(
-        columns=X_train.columns,
-        fill_value=0,
-    )
-
-    
-    # Keep numeric and engineered features in a fixed order.
-    numeric_columns = [
-        "amount_inr",
-        "hour_of_day",
-        "txn_count_last_24h",
-        "avg_amount_30d_inr",
-        "distance_from_home_km",
-        "is_new_device",
-        "account_age_days",
-        "amount_vs_avg_ratio",
-        "is_night",
-        "high_value",
-    ]
-
-    # Keep one-hot encoded features in a fixed order too.
-    categorical_encoded_columns = sorted(
-        column for column in X_train.columns
-        if column not in numeric_columns
-    )
-
-    feature_columns = (
-        numeric_columns + categorical_encoded_columns
-    )
-
-    X_train = X_train.reindex(columns=feature_columns)
-    X_val = X_val.reindex(columns=feature_columns)
-    X_test = X_test.reindex(columns=feature_columns)
-
-
-
-    return (
-        X_train,
-        X_val,
-        X_test,
-        training_distance_median,
-    )
-
-
-
-#---------------------------------------------------
-# Model evaluation and comparison
-# --------------------------------------------------
-
-
-
- 
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    confusion_matrix,
-    
-)
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.utils import resample
+from sklearn.preprocessing import StandardScaler
+
+from prepare import EXCLUDED_COLUMNS, RAW_FILE, add_features, clean_transactions
+
+SEED = 42
+THRESHOLD_GRID = [round(t, 1) for t in np.arange(0.1, 1.0, 0.1)]
+MIN_RECALL = 0.65
+PARAM_GRID = {"max_depth": [4, 6, 8, None], "min_samples_leaf": [5, 10, 20]}
 
 
-def evaluate_model(model, X_val, y_val, model_name):
-    """Evaluate a model on validation data and print fraud metrics."""
-
-    predictions = model.predict(X_val)
-
-    precision = precision_score(
-        y_val, predictions, zero_division=0
-    )
-    recall = recall_score(
-        y_val, predictions, zero_division=0
-    )
-    f1 = f1_score(
-        y_val, predictions, zero_division=0
-    )
-    accuracy = accuracy_score(y_val, predictions)
-
-    print(f"\n--- {model_name} ---")
-    print(f"Accuracy:  {accuracy:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall:    {recall:.4f}")
-    print(f"F1-score:  {f1:.4f}")
-    print("Confusion matrix [ [TN, FP], [FN, TP] ]:")
-    print(confusion_matrix(y_val, predictions, labels=[0, 1]))
-
-    return {
-        "model": model,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1,
-        "accuracy": accuracy,
-    }
+def make_forest(**params):
+    return RandomForestClassifier(n_estimators=200, class_weight="balanced", random_state=SEED, **params)
 
 
-def make_logistic_regression(class_weight=None):
-    """Create a reproducible scaled logistic regression pipeline."""
-
-    return Pipeline([
-        ("scaler", StandardScaler()),
-        (
-            "model",
-            LogisticRegression(
-                max_iter=1000,
-                class_weight=class_weight,
-                random_state=RANDOM_STATE,
-            ),
-        ),
-    ])
+def make_logistic(class_weight=None):
+    return Pipeline([("scaler", StandardScaler()),
+                     ("model", LogisticRegression(max_iter=1000, class_weight=class_weight))])
 
 
-def run_cross_validation_and_tuning(X_train, y_train, X_val, y_val):
-    """Compare models using CV and tune a Random Forest."""
+def make_folds():
+    return StratifiedKFold(n_splits=5, shuffle=True, random_state=SEED)
 
-    cv = StratifiedKFold(
-        n_splits=5,
-        shuffle=True,
-        random_state=RANDOM_STATE,
-    )
 
-    scoring = {
-        "precision": "precision",
-        "recall": "recall",
-        "f1": "f1",
-    }
+def load_model_table():
+    """Cleaned, feature-engineered and one-hot encoded table plus the target."""
+    featured = add_features(clean_transactions(pd.read_csv(RAW_FILE)))
+    y = featured["is_fraud"]
+    X = pd.get_dummies(featured.drop(columns=EXCLUDED_COLUMNS), dtype=int)
+    leaky_column = featured["chargeback_filed"]
+    return X, y, leaky_column
 
-    balanced_model = make_logistic_regression(
-        class_weight="balanced"
-    )
 
-    random_forest = RandomForestClassifier(
-        n_estimators=200,
-        class_weight="balanced",
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
-    )
+def split_data(X, y):
+    """Stratified 60/20/20 split, then fill distance with the training median."""
+    X_train, X_rest, y_train, y_rest = train_test_split(X, y, test_size=0.4, stratify=y, random_state=SEED)
+    X_val, X_test, y_val, y_test = train_test_split(X_rest, y_rest, test_size=0.5, stratify=y_rest, random_state=SEED)
+    median = X_train["distance_from_home_km"].median()
+    for part in (X_train, X_val, X_test):
+        part["distance_from_home_km"] = part["distance_from_home_km"].fillna(median)
+    return X_train, X_val, X_test, y_train, y_val, y_test, median
 
-    print("\n" + "=" * 55)
-    print("5-FOLD CROSS-VALIDATION")
-    print("=" * 55)
 
-    for name, model in [
-        ("Balanced Logistic Regression", balanced_model),
-        ("Random Forest", random_forest),
-    ]:
-        scores = cross_validate(
-            model,
-            X_train,
-            y_train,
-            cv=cv,
-            scoring=scoring,
-            n_jobs=-1,
-        )
+def tune_forest(X_train, y_train):
+    search = GridSearchCV(make_forest(), PARAM_GRID, scoring="f1", cv=make_folds(), n_jobs=-1)
+    search.fit(X_train, y_train)
+    return search
 
-        print(f"\n{name}")
-        for metric in scoring:
-            values = scores[f"test_{metric}"]
-            print(
-                f"{metric.capitalize()}: "
-                f"{values.mean():.4f} "
-                f"+/- {values.std():.4f}"
-            )
 
-    print("\n" + "=" * 55)
-    print("RANDOM FOREST GRID SEARCH")
-    print("=" * 55)
+def pick_threshold(y_true, probabilities):
+    """Highest grid threshold whose recall is at least MIN_RECALL (0.1 if none)."""
+    qualifying = [t for t in THRESHOLD_GRID
+                  if recall_score(y_true, probabilities >= t, zero_division=0) >= MIN_RECALL]
+    return max(qualifying) if qualifying else 0.1
 
-    parameter_grid = {
-        "max_depth": [4, 6, 8, None],
-        "min_samples_leaf": [5, 10, 20],
-    }
 
-    grid_search = GridSearchCV(
-        estimator=random_forest,
-        param_grid=parameter_grid,
-        scoring="f1",
-        cv=cv,
-        n_jobs=-1,
-        refit=True,
-    )
+def build_final_model():
+    """Repeat the whole Part B pipeline and return what the service needs."""
+    X, y, _ = load_model_table()
+    X_train, X_val, _, y_train, y_val, _, median = split_data(X, y)
+    search = tune_forest(X_train, y_train)
+    threshold = pick_threshold(y_val, search.best_estimator_.predict_proba(X_val)[:, 1])
+    return {"model": search.best_estimator_, "columns": list(X.columns),
+            "median": float(median), "threshold": threshold}
 
-    grid_search.fit(X_train, y_train)
 
-    print("Best parameters:", grid_search.best_params_)
-    print(f"Best mean CV F1: {grid_search.best_score_:.4f}")
+def scores(y_true, y_pred):
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    return {"precision": precision_score(y_true, y_pred, zero_division=0),
+            "recall": recall_score(y_true, y_pred, zero_division=0),
+            "f1": f1_score(y_true, y_pred, zero_division=0),
+            "TN": tn, "FP": fp, "FN": fn, "TP": tp}
 
-    # Evaluate the tuned model on validation data.
-    
-    best_model = grid_search.best_estimator_
 
-    evaluate_model(
-        best_model,
-        X_val,
-        y_val,
-        "Tuned Random Forest",
-    )
+def oversample_fraud(X_train, y_train):
+    fraud_X = X_train[y_train == 1]
+    legit_X = X_train[y_train == 0]
+    extra_fraud = fraud_X.sample(n=len(legit_X), replace=True, random_state=SEED)
+    X_over = pd.concat([legit_X, extra_fraud])
+    y_over = pd.Series([0] * len(legit_X) + [1] * len(extra_fraud), index=X_over.index)
+    return X_over, y_over
 
-    print("\n" + "=" * 55)
-    print("VALIDATION THRESHOLD TUNING")
-    print("=" * 55)
 
-    from sklearn.metrics import precision_score, recall_score, f1_score
-
-    probabilities = best_model.predict_proba(X_val)[:, 1]
-    threshold_results = []
-
-    for threshold in np.arange(0.1, 1.0, 0.1):
-        predictions = (probabilities >= threshold).astype(int)
-
-        precision = precision_score(
-            y_val, predictions, zero_division=0
-        )
-        recall = recall_score(
-            y_val, predictions, zero_division=0
-        )
-        f1 = f1_score(
-            y_val, predictions, zero_division=0
-        )
-
-        threshold_results.append({
-            "threshold": round(float(threshold), 1),
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-        })
-
-        print(
-            f"Threshold={threshold:.1f} | "
-            f"Precision={precision:.4f} | "
-            f"Recall={recall:.4f} | "
-            f"F1={f1:.4f}"
-        )
-
-    eligible = [
-        result for result in threshold_results
-        if result["recall"] >= 0.65
-    ]
-
-    if not eligible:
-        raise ValueError(
-            "No threshold achieved validation recall >= 0.65"
-        )
-
-    selected = max(
-        eligible,
-        key=lambda result: result["threshold"],
-    )
-
-    selected_threshold = selected["threshold"]
-
-    print("\nSelected threshold:", selected_threshold)
-    print("Selected threshold metrics:", selected)
-
-    return best_model, grid_search.best_params_, selected_threshold
-
+def show(title, table):
+    print(f"\n=== {title} ===")
+    print(table.round(3).to_string())
 
 
 def main():
-    df = load_clean_data()
+    X, y, leaky_column = load_model_table()
+    print("Input columns:", len(X.columns))
+    print(list(X.columns))
+    X_train, X_val, X_test, y_train, y_val, y_test, median = split_data(X, y)
 
-    (
-        X_train,
-        X_val,
-        X_test,
-        y_train,
-        y_val,
-        y_test,
-    ) = split_data(df)
+    print("\n=== Split ===")
+    for name, part, target in [("train", X_train, y_train), ("validation", X_val, y_val), ("test", X_test, y_test)]:
+        print(f"{name:<11}: {len(part)} rows, {int(target.sum())} fraud")
+    print(f"training median of distance_from_home_km: {median}")
 
-    (
-        X_train_processed,
-        X_val_processed,
-        X_test_processed,
-        distance_median,
-    ) = preprocess_data(X_train, X_val, X_test)
-
-    print("=" * 55)
-    print("PART B: BASELINE MODEL COMPARISON")
-    print("=" * 55)
-    print("Training rows:", len(X_train_processed))
-    print("Validation rows:", len(X_val_processed))
-    print("Test rows:", len(X_test_processed))
-    print("Training-only distance median:", distance_median)
-    print("Number of features:", X_train_processed.shape[1])
-
-    tuned_rf, best_rf_params, selected_threshold = (
-        run_cross_validation_and_tuning(
-            X_train_processed,
-            y_train,
-            X_val_processed,
-            y_val,
-        )
-    )
-
-    results = {}
-
-    # Model 1: Plain logistic regression
-    plain_model = make_logistic_regression()
-    plain_model.fit(X_train_processed, y_train)
-
-    results["Plain Logistic Regression"] = evaluate_model(
-        plain_model,
-        X_val_processed,
-        y_val,
-        "Plain Logistic Regression",
-    )
-
-    # Model 2: Class-weight-balanced logistic regression
-    balanced_model = make_logistic_regression(
-        class_weight="balanced"
-    )
-    balanced_model.fit(X_train_processed, y_train)
-
-    results["Balanced Logistic Regression"] = evaluate_model(
-        balanced_model,
-        X_val_processed,
-        y_val,
-        "Balanced Logistic Regression",
-    )
-
-    # Model 3: Random oversampling on training data only
-    training_data = X_train_processed.copy()
-    training_data["is_fraud"] = y_train.to_numpy()
-
-    majority = training_data[
-        training_data["is_fraud"] == 0
-    ]
-    minority = training_data[
-        training_data["is_fraud"] == 1
-    ]
-
-    minority_oversampled = resample(
-        minority,
-        replace=True,
-        n_samples=len(majority),
-        random_state=RANDOM_STATE,
-    )
-
-    oversampled_data = pd.concat(
-        [majority, minority_oversampled],
-        ignore_index=True,
-    )
-
-    X_train_oversampled = oversampled_data.drop(
-        columns=["is_fraud"]
-    )
-    y_train_oversampled = oversampled_data["is_fraud"]
-
-    oversampled_model = make_logistic_regression()
-    oversampled_model.fit(
-        X_train_oversampled,
-        y_train_oversampled,
-    )
-
-    print(
-        "\nOversampled training rows:",
-        len(X_train_oversampled),
-    )
-    print(
-        "Oversampled fraud cases:",
-        int(y_train_oversampled.sum()),
-    )
-
-    results["Oversampled Logistic Regression"] = evaluate_model(
-        oversampled_model,
-        X_val_processed,
-        y_val,
-        "Oversampled Logistic Regression",
-    )
-
-    # Compare results using fraud F1-score.
-    comparison = pd.DataFrame([
-        {
-            "model": name,
-            "precision": result["precision"],
-            "recall": result["recall"],
-            "f1": result["f1"],
-            "accuracy": result["accuracy"],
-        }
-        for name, result in results.items()
-    ])
-
-    print("\n" + "=" * 55)
-    print("VALIDATION RESULTS COMPARISON")
-    print("=" * 55)
-    print(
-        comparison.sort_values(
-            "f1",
-            ascending=False,
-        ).to_string(index=False, float_format=lambda x: f"{x:.4f}")
-    )
-
-    print("\nNote: The test set has not been used for model selection.")
-    print("Baseline model comparison complete.")
-
-    
-def build_final_model():
-    """Train the selected fraud model and return API-ready artifacts."""
-
-    df = load_clean_data()
-
-    (
-        X_train,
-        X_val,
-        X_test,
-        y_train,
-        y_val,
-        y_test,
-    ) = split_data(df)
-
-    (
-        X_train_processed,
-        X_val_processed,
-        X_test_processed,
-        distance_median,
-    ) = preprocess_data(X_train, X_val, X_test)
-
-    model, best_params, threshold = run_cross_validation_and_tuning(
-        X_train_processed,
-        y_train,
-        X_val_processed,
-        y_val,
-    )
-
-    # Combine train and validation data for final fitting.
-    X_final = pd.concat(
-        [X_train_processed, X_val_processed],
-        axis=0,
-    )
-    y_final = pd.concat([y_train, y_val], axis=0)
-
-    final_model = clone(model)
-    final_model.fit(X_final, y_final)
-
-    return {
-        "model": final_model,
-        "columns": list(X_final.columns),
-        "median": distance_median,
-        "threshold": threshold,
-        "best_params": best_params,
+    # Three ways to treat imbalance, evaluated on validation at 0.5
+    X_over, y_over = oversample_fraud(X_train, y_train)
+    print(f"\nover-sampled training rows: {len(X_over)} ({int(y_over.sum())} fraud)")
+    variants = {
+        "plain": make_logistic().fit(X_train, y_train),
+        "class_weight=balanced": make_logistic("balanced").fit(X_train, y_train),
+        "over-sampled": make_logistic().fit(X_over, y_over),
     }
+    rows = {name: scores(y_val, model.predict_proba(X_val)[:, 1] >= 0.5) for name, model in variants.items()}
+    show("Imbalance treatments, validation at 0.5", pd.DataFrame(rows).T)
 
+    # Cross-validation on the training split only
+    folds = make_folds()
+    cv_rows = {}
+    for name, estimator in [("balanced logistic regression", make_logistic("balanced")),
+                            ("untuned random forest", make_forest())]:
+        f1_scores = cross_val_score(estimator, X_train, y_train, scoring="f1", cv=folds, n_jobs=-1)
+        cv_rows[name] = {"mean_f1": f1_scores.mean(), "std_f1": f1_scores.std()}
+    show("5-fold CV F1 (training split)", pd.DataFrame(cv_rows).T)
 
+    search = tune_forest(X_train, y_train)
+    best_index = search.best_index_
+    print(f"\ngrid search: {len(search.cv_results_['params'])} combinations x 5 folds")
+    print("best parameters:", search.best_params_)
+    print(f"best mean CV F1: {search.best_score_:.3f} "
+          f"(std across folds {search.cv_results_['std_test_score'][best_index]:.3f})")
+    forest = search.best_estimator_
 
+    # Threshold chosen on validation only
+    val_proba = forest.predict_proba(X_val)[:, 1]
+    threshold_rows = {}
+    for t in THRESHOLD_GRID:
+        flagged = val_proba >= t
+        result = scores(y_val, flagged)
+        threshold_rows[t] = {"precision": result["precision"], "recall": result["recall"],
+                             "f1": result["f1"], "flagged": int(flagged.sum())}
+    show("Validation threshold table", pd.DataFrame(threshold_rows).T)
+    t_star = pick_threshold(y_val, val_proba)
+    print(f"t_star = {t_star}")
+
+    # One final test evaluation
+    test_flagged = forest.predict_proba(X_test)[:, 1] >= t_star
+    test_result = scores(y_test, test_flagged)
+    print(f"\n=== Test split at t_star={t_star} (used once) ===")
+    print({k: (round(float(v), 3) if k in ("precision", "recall", "f1") else int(v)) for k, v in test_result.items()})
+    print("payments flagged:", int(test_flagged.sum()))
+    print(f"legitimate payments held per fraud caught: {test_result['FP'] / test_result['TP']:.2f}")
+
+    # Leakage experiment: chargeback_filed as the 27th column
+    X_train_leaky = X_train.assign(chargeback_filed=leaky_column.loc[X_train.index])
+    X_val_leaky = X_val.assign(chargeback_filed=leaky_column.loc[X_val.index])
+    leaky_forest = make_forest(**search.best_params_).fit(X_train_leaky, y_train)
+    clean_f1 = f1_score(y_val, forest.predict_proba(X_val)[:, 1] >= 0.5)
+    leaky_f1 = f1_score(y_val, leaky_forest.predict_proba(X_val_leaky)[:, 1] >= 0.5)
+    print("\n=== Leakage experiment (validation F1 at 0.5) ===")
+    print(f"clean tuned forest: {clean_f1:.3f}   with chargeback_filed: {leaky_f1:.3f}")
+
+    importance = pd.Series(forest.feature_importances_, index=X.columns).sort_values(ascending=False)
+    print("\n=== Top 5 feature importances ===")
+    print(importance.head(5).round(3).to_string())
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,10 +1,10 @@
-2026-10-21 16:42:40,385 INFO method=POST endpoint=/score status=200 latency_ms=53.48 txn_id=T800001 fraud_probability=0.0284
-2026-10-21 16:42:40,453 INFO method=POST endpoint=/score status=200 latency_ms=47.66 txn_id=T800002 fraud_probability=0.9525
-2026-10-21 16:42:40,511 WARNING method=POST endpoint=/score status=200 latency_ms=44.88 txn_id=T800003 fraud_probability=0.1766
-2026-10-21 16:42:40,529 WARNING method=POST endpoint=/score status=400 latency_ms=1.21 txn_id=T800004 fraud_probability=n/a
-2026-10-21 16:42:40,547 WARNING method=POST endpoint=/score status=422 latency_ms=2.69 txn_id=T800005 fraud_probability=n/a
-2026-10-21 16:42:40,605 INFO method=POST endpoint=/case status=200 latency_ms=55.04 txn_id=T900002 fraud_probability=0.9525
-2026-10-21 16:42:40,669 WARNING method=POST endpoint=/case status=200 latency_ms=47.18 txn_id=T900005 fraud_probability=0.9525
-2026-10-21 16:42:40,733 ERROR method=POST endpoint=/case status=503 latency_ms=47.67 txn_id=T900099 error=ConnectionError
-2026-10-21 16:42:40,793 INFO method=POST endpoint=/case status=200 latency_ms=45.59 txn_id=T800001 fraud_probability=0.0284
-2026-10-21 16:42:40,857 INFO method=POST endpoint=/case status=200 latency_ms=46.41 txn_id=T800006 fraud_probability=0.9525
+2026-10-26 15:52:34,081 INFO endpoint=/score status=200 latency_ms=38.5 txn_id=T800001 fraud_probability=0.043
+2026-10-26 15:52:34,122 INFO endpoint=/score status=200 latency_ms=34.6 txn_id=T800002 fraud_probability=0.9597
+2026-10-26 15:52:34,172 WARNING endpoint=/score status=200 latency_ms=27.5 txn_id=T800003 fraud_probability=0.1765 guardrail_override=true
+2026-10-26 15:52:34,179 WARNING endpoint=/score status=400 latency_ms=1.9 txn_id=T800004
+2026-10-26 15:52:34,188 WARNING endpoint=/score status=422 latency_ms=4.4
+2026-10-26 15:52:34,237 INFO endpoint=/case status=200 latency_ms=42.1 txn_id=T900002 fraud_probability=0.9597
+2026-10-26 15:52:34,283 WARNING endpoint=/case status=200 latency_ms=31.3 txn_id=T900005 fraud_probability=0.9597 safe_default=true
+2026-10-26 15:52:34,333 ERROR endpoint=/case status=503 latency_ms=42.8 txn_id=T900099 fraud_probability=0.9597
+2026-10-26 15:52:34,365 INFO endpoint=/case status=200 latency_ms=26.0 txn_id=T800001 fraud_probability=0.043
+2026-10-26 15:52:34,423 INFO endpoint=/case status=200 latency_ms=32.2 txn_id=T800006 fraud_probability=0.9597
